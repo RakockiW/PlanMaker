@@ -5,7 +5,7 @@ import networkx as nx
 Slot = Tuple[str, int, int]           # (day, start_min, end_min)
 ParticipantSlots = Dict[str, List[Slot]]
 ClassTimes = Dict[str, Dict[str, Tuple[int,int]]]
-
+LARGE_PENALTY = 10**6
 
 
 def parse_time(t: str) -> int:
@@ -23,10 +23,6 @@ def str_to_slot(s: str) -> Slot:
     sh, sm = map(int, start_s.split(":"))
     eh, em = map(int, end_s.split(":"))
     return day, sh * 60 + sm, eh * 60 + em
-
-LARGE_PENALTY = 10**6
-
-
 
 def read_bells(file: Union[str, IO]) -> Dict[int, str]:
     df = pd.read_csv(file, header=None, names=["Nr", "Godziny"])
