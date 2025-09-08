@@ -1,6 +1,6 @@
 import pandas as pd
 import networkx as nx
-from typing import Dict, List, Tuple, Set, Union, IO
+from typing import Dict, List, Tuple, Set, Union, IO, Optional
 
 Slot = Tuple[str, int, int]  # (day, start_min, end_min)
 
@@ -11,13 +11,14 @@ class GroupScheduler:
     def __init__(self, bells_csv: str, schedule_csv: str, participants_csv: str,
                  earliest_hour: str = "08:00", latest_hour: str = "18:00",
                  slot_len: int = 60, step: int = 15,
-                 min_size: int = 5, max_size: int = 12):
+                 min_size: int = 5, max_size: int = 12, included_days: Optional[List[str]] = None,):
 
         self.bells_csv = bells_csv
         self.schedule_csv = schedule_csv
         self.participants_csv = participants_csv
         self.earliest_hour = earliest_hour
         self.latest_hour = latest_hour
+        self.included_days = included_days
         self.slot_len = slot_len
         self.step = step
         self.min_size = min_size
@@ -87,7 +88,7 @@ class GroupScheduler:
             if cls not in self.schedule:
                 continue
             for day, rng in self.schedule[cls].items():
-                if pd.isna(rng) or str(rng).strip() == "":
+                if pd.isna(rng) or str(rng).strip() == "" or day not in self.included_days:
                     continue
                 start_s, end_s = rng.split("-")
                 class_start = self.parse_time(start_s)
@@ -111,11 +112,11 @@ class GroupScheduler:
         class_start, class_end = times[day]
 
         if slot_end <= class_start:
-            return class_start - slot_end, "before"
+            return class_start - slot_end, "na start lekcji"
         elif slot_start >= class_end:
-            return slot_start - class_end, "after"
+            return slot_start - class_end, "na start zajęć"
         else:
-            return self.LARGE_PENALTY, "conflict"
+            return self.LARGE_PENALTY, "konflikt!"
 
     def assign_groups(self):
 
@@ -200,11 +201,71 @@ class GroupScheduler:
             if not candidate_slots:
                 return {}
 
-    def get_assigned_wait_time(self):
+    def move_member(self, member: str, to_slot_str: str, from_slot_str: Optional[str] = None,
+                    allow_conflict: bool = True) -> Tuple[bool, str, bool]:
+
+        if member is None or to_slot_str is None:
+            return False, "Niepoprawne argumenty (member lub to_slot_str są puste).", False
+
+        try:
+            to_slot = self.str_to_slot(to_slot_str)
+        except Exception as e:
+            return False, f"Niepoprawny format to_slot_str: {to_slot_str}", False
+
+        wait, when = self.compute_wait_minutes(member, to_slot)
+        conflict = (wait >= self.LARGE_PENALTY)
+
+        if conflict and not allow_conflict:
+            return False, f"Przeniesienie zablokowane: konflikt ({when}).", True
+
+        target_members = self.groups.get(to_slot_str, [])
+        if len(target_members) >= self.max_size and member not in target_members:
+            return False, f"Grupa docelowa '{to_slot_str}' jest pełna (max_size={self.max_size}).", False
+
+        source_slot = None
+        if from_slot_str:
+            if from_slot_str in self.groups and member in self.groups[from_slot_str]:
+                source_slot = from_slot_str
+            else:
+                return False, f"Uczestnik '{member}' nie należy do grupy źródłowej '{from_slot_str}'.", False
+        else:
+            for s, members in self.groups.items():
+                if member in members:
+                    source_slot = s
+                    break
+
+        if source_slot:
+            if member in self.groups.get(source_slot, []):
+                self.groups[source_slot].remove(member)
+
+            if len(self.groups.get(source_slot, [])) < self.min_size:
+                remaining = self.groups.pop(source_slot, [])
+                for p in remaining:
+                    if p in self.wait_times:
+                        self.wait_times[p].pop(source_slot, None)
+                    if p not in self.unassigned:
+                        self.unassigned.append(p)
+
+        self.groups.setdefault(to_slot_str, [])
+        if member not in self.groups[to_slot_str]:
+            self.groups[to_slot_str].append(member)
+
+        self.wait_times.setdefault(member, {})
+        self.wait_times[member][to_slot_str] = (wait, when)
+
+        if conflict:
+            return True, f"Przeniesiono '{member}' do '{to_slot_str}', ale wykryto konflikt: {when}.", True
+        else:
+            return True, f"Przeniesiono '{member}' do '{to_slot_str}'.", False
+
+    def get_assigned_wait_time(self) -> list[Tuple[str, int, str]]:
+        assigned_wait_time = []
         for slot_str, members in self.groups.items():
             for participant in members:
                 wait, when = self.wait_times.get(participant, {}).get(slot_str, 0)
-                print(f"{participant} -> {slot_str}: {wait} min {when}")
+                assigned_wait_time.append((participant, slot_str, wait, when))
+
+        return assigned_wait_time
 
     def generate_groups(self):
 
@@ -214,6 +275,5 @@ class GroupScheduler:
         self.build_participant_slots()
 
         self.groups = self.assign_groups()
-        print(self.get_assigned_wait_time())
-        return self.groups
+        return self.groups, self.get_assigned_wait_time()
 
